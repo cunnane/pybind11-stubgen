@@ -10,13 +10,15 @@ import os
 import re
 from argparse import ArgumentParser
 
+DOCUMENTATION_MODE = False
+OUTPUT_FILE_TYPE = ".pyi"
+
 logger = logging.getLogger(__name__)
 
 _visited_objects = []
 
 # A list of function docstring pre-processing hooks
 function_docstring_preprocessing_hooks: List[Callable[[str], str]] = []
-
 
 def _find_str_end(s, start):
     for i in range(start + 1, len(s)):
@@ -225,6 +227,7 @@ def replace_typing_types(match):
 
 
 class StubsGenerator(object):
+
     INDENT = " " * 4
 
     GLOBAL_CLASSNAME_REPLACEMENTS = {
@@ -445,10 +448,14 @@ class AttributeStubsGenerator(StubsGenerator):
                 value_comment = ""
             else:
                 value_comment = " # value = {value}".format(value=value)
+                
+            #Add =None so that variable exists for sphinx to find
+            variable_value = "=None" if DOCUMENTATION_MODE else ""
             return [
-                "{name}: {typename}{value_comment}".format(
+                "{name}: {typename}{variable_value}{value_comment}".format( 
                     name=self.name,
                     typename=typename,
+                    variable_value=variable_value,
                     value_comment=value_comment)
             ]
         else:
@@ -803,24 +810,27 @@ class ModuleStubsGenerator(StubsGenerator):
                 "from __future__ import annotations"
             ]
 
-        result += [
-            "import {}".format(self.module.__name__)
-        ]
-
         # import everything from typing
         result += [
             "import typing"
         ]
-
-        for name, class_ in self.imported_classes.items():
-            class_name = getattr(class_, "__qualname__", class_.__name__)
-            if name == class_name:
-                suffix = ""
-            else:
-                suffix = " as {}".format(name)
+        
+        # We assume we need to create doc stubs because the source module is unavailable
+        # so we definitely don't want to try to import it
+        if not DOCUMENTATION_MODE:
             result += [
-                'from {} import {}{}'.format(class_.__module__, class_name, suffix)
+                "import {}".format(self.module.__name__)
             ]
+
+            for name, class_ in self.imported_classes.items():
+                class_name = getattr(class_, "__qualname__", class_.__name__)
+                if name == class_name:
+                    suffix = ""
+                else:
+                    suffix = " as {}".format(name)
+                result += [
+                    'from {} import {}{}'.format(class_.__module__, class_name, suffix)
+                ]
 
         # import used packages
         used_modules = sorted(self.get_involved_modules_names())
@@ -855,7 +865,7 @@ class ModuleStubsGenerator(StubsGenerator):
 
     def write(self):
         with DirectoryWalkerGuard(self.short_name + self.stub_suffix):
-            with open("__init__.pyi", "w", encoding="utf-8") as init_pyi:
+            with open("__init__.{}".format(OUTPUT_FILE_TYPE), "w", encoding="utf-8") as init_pyi: 
                 init_pyi.write("\n".join(self.to_lines()))
             for m in self.submodules:
                 m.write()
@@ -887,6 +897,44 @@ setup(
     package_data=find_stubs('{package_name}-stubs'),
 )""".format(package_name=self.short_name))
 
+def _init_logger(level):
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    handlers = [stderr_handler]
+
+    logging.basicConfig(
+        level=logging.getLevelName(level),
+        format='[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s',
+        handlers=handlers
+    )
+   
+def _log_invalid_signatures():
+    if FunctionSignature.n_invalid_signatures > 0:
+        logger.info("Useful link: Avoiding C++ types in docstrings:")
+        logger.info("      https://pybind11.readthedocs.io/en/latest/advanced/misc.html"
+                    "#avoiding-cpp-types-in-docstrings")
+
+    if FunctionSignature.n_invalid_default_values > 0:
+        logger.info("Useful link: Default argument representation:")
+        logger.info("      https://pybind11.readthedocs.io/en/latest/advanced/functions.html"
+                    "#default-arguments-revisited")
+
+def write_documentation_stubs(module_name, output_dir, log_level="INFO"):
+
+    global DOCUMENTATION_MODE, OUTPUT_FILE_TYPE
+    stub_gen = ModuleStubsGenerator(module_name)
+    
+    # TODO: set these back...or don't use globals!
+    DOCUMENTATION_MODE = True
+    OUTPUT_FILE_TYPE = ".py"
+    
+    _init_logger(log_level)
+    
+    stub_gen.parse()
+    
+    with DirectoryWalkerGuard(output_dir):
+        stub_gen.write()
+
+    _log_invalid_signatures()
 
 def main(args=None):
     parser = ArgumentParser(prog='pybind11-stubgen', description="Generates stubs for specified modules")
@@ -932,15 +980,8 @@ def main(args=None):
         sys_args.root_module_suffix = sys_args.root_module_suffix_deprecated
         warnings.warn("`--root_module_suffix` is deprecated in favor of `--root-module-suffix`", FutureWarning)
 
-    stderr_handler = logging.StreamHandler(sys.stderr)
-    handlers = [stderr_handler]
-
-    logging.basicConfig(
-        level=logging.getLevelName(sys_args.log_level),
-        format='[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s',
-        handlers=handlers
-    )
-
+    _init_logger(sys_args.log_level)
+    
     with DirectoryWalkerGuard(sys_args.output_dir):
         for _module_name in sys_args.module_names:
             _module = ModuleStubsGenerator(_module_name)
@@ -953,18 +994,10 @@ def main(args=None):
                 with DirectoryWalkerGuard(_dir):
                     _module.write()
 
-        if FunctionSignature.n_invalid_signatures > 0:
-            logger.info("Useful link: Avoiding C++ types in docstrings:")
-            logger.info("      https://pybind11.readthedocs.io/en/latest/advanced/misc.html"
-                        "#avoiding-cpp-types-in-docstrings")
-
-        if FunctionSignature.n_invalid_default_values > 0:
-            logger.info("Useful link: Default argument representation:")
-            logger.info("      https://pybind11.readthedocs.io/en/latest/advanced/functions.html"
-                        "#default-arguments-revisited")
-
-        if FunctionSignature.n_fatal_errors() > 0:
-            exit(1)
+        _log_invalid_signatures()
+        
+    if FunctionSignature.n_fatal_errors() > 0:
+        exit(1)
 
 
 if __name__ == "__main__":
