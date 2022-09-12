@@ -11,7 +11,7 @@ import re
 from argparse import ArgumentParser
 
 DOCUMENTATION_MODE = False
-OUTPUT_FILE_TYPE = ".pyi"
+OUTPUT_FILE_TYPE = "pyi"
 
 logger = logging.getLogger(__name__)
 
@@ -925,7 +925,7 @@ def write_documentation_stubs(module_name, output_dir, log_level="INFO"):
     
     # TODO: set these back...or don't use globals!
     DOCUMENTATION_MODE = True
-    OUTPUT_FILE_TYPE = ".py"
+    OUTPUT_FILE_TYPE = "py"
     
     _init_logger(log_level)
     
